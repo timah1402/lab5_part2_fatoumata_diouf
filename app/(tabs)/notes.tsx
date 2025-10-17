@@ -1,4 +1,4 @@
-// app/(tabs)/index.tsx
+// app/(tabs)/notes.tsx
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -19,41 +19,53 @@ import {
   updateNote,
   deleteNote,
   getCategories,
+  getTags,
+  addTag,
+  addTagToNote,
+  getTagsForNote,
 } from '../../services/dbService';
-import { Note, Category } from '../../types';
+import { getSetting } from '../../services/settingsService';
+import { Note, Category, Tag, AppSettings } from '../../types';
 
-export default function NotesScreen() {
+export default function NotesTabScreen() {
   const { colors, theme } = useTheme();
   const [notes, setNotes] = useState<Note[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
   const [modalVisible, setModalVisible] = useState(false);
   const [editingNote, setEditingNote] = useState<Note | null>(null);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<number | undefined>();
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [newTag, setNewTag] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [filterCategory, setFilterCategory] = useState<number | undefined>();
+  const [sortBy, setSortBy] = useState<AppSettings['sortBy']>('date');
 
   useEffect(() => {
-    loadNotes();
-    loadCategories();
+    loadData();
+    loadSettings();
   }, []);
 
-  const loadNotes = async () => {
+  const loadData = async () => {
     try {
-      const loadedNotes = await getNotes();
+      const [loadedNotes, loadedCategories, loadedTags] = await Promise.all([
+        getNotes(),
+        getCategories(),
+        getTags(),
+      ]);
       setNotes(loadedNotes);
+      setCategories(loadedCategories);
+      setTags(loadedTags);
     } catch (error) {
-      console.error('Error loading notes:', error);
+      console.error('Error loading data:', error);
     }
   };
 
-  const loadCategories = async () => {
-    try {
-      const loadedCategories = await getCategories();
-      setCategories(loadedCategories);
-    } catch (error) {
-      console.error('Error loading categories:', error);
-    }
+  const loadSettings = async () => {
+    const savedSortBy = await getSetting('sortBy');
+    setSortBy(savedSortBy);
   };
 
   const handleSaveNote = async () => {
@@ -63,23 +75,40 @@ export default function NotesScreen() {
     }
 
     try {
+      let noteId: number;
+      
       if (editingNote) {
         await updateNote(editingNote.id!, {
           title,
           content,
           category_id: selectedCategory,
         });
+        noteId = editingNote.id!;
       } else {
-        await addNote({
+        noteId = await addNote({
           title,
           content,
           category_id: selectedCategory,
         });
       }
+
+      // Handle tags
+      for (const tagName of selectedTags) {
+        const existingTag = tags.find(t => t.name === tagName);
+        let tagId: number;
+        
+        if (existingTag) {
+          tagId = existingTag.id!;
+        } else {
+          tagId = await addTag(tagName);
+        }
+        
+        await addTagToNote(noteId, tagId);
+      }
       
       setModalVisible(false);
       resetForm();
-      loadNotes();
+      loadData();
     } catch (error) {
       console.error('Error saving note:', error);
       Alert.alert('Error', 'Failed to save note');
@@ -98,7 +127,7 @@ export default function NotesScreen() {
           onPress: async () => {
             try {
               await deleteNote(noteId);
-              loadNotes();
+              loadData();
             } catch (error) {
               console.error('Error deleting note:', error);
             }
@@ -108,11 +137,20 @@ export default function NotesScreen() {
     );
   };
 
-  const handleEditNote = (note: Note) => {
+  const handleEditNote = async (note: Note) => {
     setEditingNote(note);
     setTitle(note.title);
     setContent(note.content);
     setSelectedCategory(note.category_id);
+    
+    // Load tags for this note
+    try {
+      const noteTags = await getTagsForNote(note.id!);
+      setSelectedTags(noteTags.map(t => t.name));
+    } catch (error) {
+      console.error('Error loading note tags:', error);
+    }
+    
     setModalVisible(true);
   };
 
@@ -120,13 +158,51 @@ export default function NotesScreen() {
     setTitle('');
     setContent('');
     setSelectedCategory(undefined);
+    setSelectedTags([]);
+    setNewTag('');
     setEditingNote(null);
   };
 
-  const filteredNotes = notes.filter(
-    note =>
-      note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      note.content.toLowerCase().includes(searchQuery.toLowerCase())
+  const handleAddTag = () => {
+    if (newTag.trim() && !selectedTags.includes(newTag.trim())) {
+      setSelectedTags([...selectedTags, newTag.trim()]);
+      setNewTag('');
+    }
+  };
+
+  const handleRemoveTag = (tag: string) => {
+    setSelectedTags(selectedTags.filter(t => t !== tag));
+  };
+
+  const sortNotes = (notesToSort: Note[]) => {
+    const sorted = [...notesToSort];
+    switch (sortBy) {
+      case 'title':
+        return sorted.sort((a, b) => a.title.localeCompare(b.title));
+      case 'category':
+        return sorted.sort((a, b) => {
+          const catA = getCategoryName(a.category_id);
+          const catB = getCategoryName(b.category_id);
+          return catA.localeCompare(catB);
+        });
+      case 'date':
+      default:
+        return sorted.sort((a, b) => {
+          const dateA = new Date(a.updated_at || a.created_at || '').getTime();
+          const dateB = new Date(b.updated_at || b.created_at || '').getTime();
+          return dateB - dateA;
+        });
+    }
+  };
+
+  const filteredNotes = sortNotes(
+    notes.filter(note => {
+      const matchesSearch = 
+        note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        note.content.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesCategory = !filterCategory || note.category_id === filterCategory;
+      return matchesSearch && matchesCategory;
+    })
   );
 
   const getCategoryName = (categoryId?: number) => {
@@ -148,7 +224,7 @@ export default function NotesScreen() {
       onLongPress={() => handleDeleteNote(item.id!)}
     >
       <View style={styles.noteHeader}>
-        <Text style={[styles.noteTitle, { color: colors.text }]}>
+        <Text style={[styles.noteTitle, { color: colors.text }]} numberOfLines={1}>
           {item.title}
         </Text>
         <View
@@ -168,13 +244,16 @@ export default function NotesScreen() {
       >
         {item.content}
       </Text>
-      <Text style={[styles.noteDate, { color: colors.text + '80' }]}>
-        {new Date(item.updated_at || item.created_at || '').toLocaleDateString()}
-      </Text>
+      <View style={styles.noteFooter}>
+        <Text style={[styles.noteDate, { color: colors.text + '80' }]}>
+          {new Date(item.updated_at || item.created_at || '').toLocaleDateString()}
+        </Text>
+      </View>
     </TouchableOpacity>
   );
 
   return (
+    
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <View style={styles.searchContainer}>
         <Ionicons name="search" size={20} color={colors.text} />
@@ -186,6 +265,40 @@ export default function NotesScreen() {
           onChangeText={setSearchQuery}
         />
       </View>
+
+      <ScrollView 
+        horizontal 
+        showsHorizontalScrollIndicator={false}
+        style={styles.filterContainer}
+      >
+        <TouchableOpacity
+          style={[
+            styles.filterChip,
+            !filterCategory && styles.filterChipActive,
+            { borderColor: colors.border },
+          ]}
+          onPress={() => setFilterCategory(undefined)}
+        >
+          <Text style={[styles.filterChipText, { color: colors.text }]}>
+            All
+          </Text>
+        </TouchableOpacity>
+        {categories.map((category) => (
+          <TouchableOpacity
+            key={category.id}
+            style={[
+              styles.filterChip,
+              filterCategory === category.id && styles.filterChipActive,
+              { borderColor: category.color },
+            ]}
+            onPress={() => setFilterCategory(category.id)}
+          >
+            <Text style={[styles.filterChipText, { color: colors.text }]}>
+              {category.name}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
 
       <FlatList
         data={filteredNotes}
@@ -271,6 +384,33 @@ export default function NotesScreen() {
               </ScrollView>
             </View>
 
+            <View style={styles.tagSection}>
+              <Text style={[styles.label, { color: colors.text }]}>Tags:</Text>
+              <View style={styles.tagInputContainer}>
+                <TextInput
+                  style={[styles.tagInput, { color: colors.text, borderColor: colors.border }]}
+                  placeholder="Add tag..."
+                  placeholderTextColor={colors.text + '80'}
+                  value={newTag}
+                  onChangeText={setNewTag}
+                  onSubmitEditing={handleAddTag}
+                />
+                <TouchableOpacity onPress={handleAddTag} style={styles.addTagButton}>
+                  <Ionicons name="add-circle" size={24} color={colors.primary} />
+                </TouchableOpacity>
+              </View>
+              <View style={styles.selectedTags}>
+                {selectedTags.map((tag) => (
+                  <View key={tag} style={[styles.tag, { backgroundColor: colors.primary + '20' }]}>
+                    <Text style={[styles.tagText, { color: colors.primary }]}>{tag}</Text>
+                    <TouchableOpacity onPress={() => handleRemoveTag(tag)}>
+                      <Ionicons name="close-circle" size={16} color={colors.primary} />
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </View>
+            </View>
+
             <TextInput
               style={[
                 styles.input,
@@ -308,6 +448,24 @@ const styles = StyleSheet.create({
     marginLeft: 10,
     fontSize: 16,
   },
+  filterContainer: {
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    maxHeight: 50,
+  },
+  filterChip: {
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderRadius: 20,
+    marginRight: 10,
+  },
+  filterChipActive: {
+    backgroundColor: 'rgba(0, 122, 255, 0.1)',
+  },
+  filterChipText: {
+    fontSize: 14,
+  },
   listContainer: {
     padding: 15,
   },
@@ -326,6 +484,7 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     flex: 1,
+    marginRight: 10,
   },
   categoryBadge: {
     paddingHorizontal: 10,
@@ -340,6 +499,11 @@ const styles = StyleSheet.create({
   noteContent: {
     fontSize: 14,
     marginBottom: 5,
+  },
+  noteFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   noteDate: {
     fontSize: 12,
@@ -409,5 +573,40 @@ const styles = StyleSheet.create({
   },
   categoryOptionSelected: {
     backgroundColor: 'rgba(0, 122, 255, 0.1)',
+  },
+  tagSection: {
+    marginBottom: 15,
+  },
+  tagInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  tagInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 8,
+    marginRight: 10,
+  },
+  addTagButton: {
+    padding: 5,
+  },
+  selectedTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  tag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 15,
+    marginRight: 5,
+    marginBottom: 5,
+  },
+  tagText: {
+    marginRight: 5,
+    fontSize: 14,
   },
 });
